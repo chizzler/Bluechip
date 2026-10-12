@@ -1,4 +1,4 @@
-# BlueBar
+# Bluechip
 
 A more capable Bluetooth widget for the Omarchy bar. It builds on Omarchy's
 own Bluetooth widget, so it looks and behaves like the rest of the desktop.
@@ -37,7 +37,7 @@ Started 2026-10-12, after pairing an 8BitDo Pro 2 controller.
 
 | What | Path |
 |------|------|
-| Plugin source (this repo) | `~/Projects/BlueBar/plugin/` |
+| Plugin source (this repo) | `~/Projects/Bluechip/plugin/` |
 | Where Omarchy loads it (symlink → `plugin/`) | `~/.config/omarchy/plugins/chee.bluetooth` |
 | Panel UI | `plugin/Panel.qml` |
 | Data helpers | `plugin/Model.js` |

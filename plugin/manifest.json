@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "chee.bluetooth",
-  "name": "My Bluetooth",
+  "name": "Bluechip",
   "version": "1.0.0",
   "author": "Omarchy",
   "description": "Bluetooth devices with details, rename, trust/block, and driver battery",
@@ -12,7 +12,7 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "My Bluetooth",
+    "displayName": "Bluechip",
     "description": "Bluetooth devices with details, rename, trust/block, and driver battery",
     "category": "Network",
     "allowMultiple": false
