@@ -8,17 +8,28 @@
 
 set -u
 
-# Driver batteries. The power_supply's HID parent records the Bluetooth MAC as
-# HID_UNIQ, whatever the driver names the supply. One line per battery:
-# mac, source, capacity, capacity_level, status (tab-separated).
+mac_re='([0-9a-fA-F]{2}[:_-]){5}[0-9a-fA-F]{2}'
+
+# Driver batteries (xpadneo, hid-sony, hid-playstation, hid-nintendo, ...).
+# The supply's HID parent records the Bluetooth MAC as HID_UNIQ, whatever the
+# driver names the supply. When that's missing or isn't a MAC (a wired
+# controller may carry a USB serial there), fall back to the supply's name:
+# DualShock 4, DualSense and Switch Pro supplies are named after the address.
+# One line per battery: mac, source, capacity, capacity_level, status
+# (tab-separated).
 batteries=""
 for ps in /sys/class/power_supply/*; do
-  [[ -r $ps/device/uevent ]] || continue
   mac=""
-  while IFS='=' read -r key value; do
-    [[ $key == HID_UNIQ ]] && mac=${value,,}
-  done <"$ps/device/uevent"
+  if [[ -r $ps/device/uevent ]]; then
+    while IFS='=' read -r key value; do
+      [[ $key == HID_UNIQ && $value =~ ^$mac_re$ ]] && mac=${value,,}
+    done <"$ps/device/uevent"
+  fi
+  if [[ -z $mac && ${ps##*/} =~ $mac_re ]]; then
+    mac=${BASH_REMATCH[0],,}
+  fi
   [[ -n $mac ]] || continue
+  mac=${mac//[_-]/:}
 
   capacity="" level="" status=""
   [[ -r $ps/capacity ]] && read -r capacity <"$ps/capacity"

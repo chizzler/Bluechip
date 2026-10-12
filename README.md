@@ -15,12 +15,13 @@ follows your theme, and sits in the same place in the bar.
 - **Everything the built-in panel does:** power toggle, scan, pair, connect,
   disconnect and forget.
 - **Battery gauge** under each connected device. It has five segments in your
-  theme's accent colour, turning to the theme's urgent colour when low, and
-  shows a bolt while charging.
+  theme's accent colour, turning to the theme's urgent colour when low.
   - Battery comes from Bluetooth when the device reports it there, or from the
-    input driver otherwise. That covers controllers on drivers like xpadneo
-    (Xbox-mode controllers such as the 8BitDo Pro 2) and others that publish
-    to `/sys/class/power_supply`.
+    input driver otherwise. That covers game controllers whose charge never
+    reaches Bluetooth: DualShock 4, DualSense, Switch Pro, and Xbox-mode
+    controllers on xpadneo such as the 8BitDo Pro 2.
+  - The charging state shows next to the level, e.g. "80% · Charging",
+    "Full · Charged" or "Low · Not charging".
   - Drivers that report only a level (Critical / Low / Normal / High / Full)
     map one-to-one onto the five segments. Percentages fill one segment per
     20%.

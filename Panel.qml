@@ -1237,7 +1237,7 @@ Panel {
     Text {
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
-      text: gauge.level ? gauge.level.label + (gauge.level.charging ? " 󱐋" : "") : ""
+      text: (gauge.level && gauge.level.charging ? "󱐋 " : "") + Model.batteryLabel(gauge.level)
       color: gauge.level && gauge.level.low ? Color.urgent : Qt.darker(root.bar.foreground, 1.3)
       font.family: root.bar.fontFamily
       font.pixelSize: Style.font.caption
@@ -1269,8 +1269,7 @@ Panel {
 
     readonly property var facts: {
       if (!dev) return []
-      var level = Model.batteryLevel(dev, extra)
-      var battery = level ? level.label + (level.charging ? ", charging" : "") : ""
+      var battery = Model.batteryLabel(Model.batteryLevel(dev, extra))
       var status = dev.connected ? "Connected" : (dev.paired || dev.bonded ? "Paired" : "Not paired")
       var list = [
         ["Type", Model.deviceType(dev.icon)],

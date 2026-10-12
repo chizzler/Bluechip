@@ -52,7 +52,11 @@ Upstream original, for comparison:
     call. Common SIG UUIDs map to names; others show as `0x….`
   - `battery`: `{source, percent, level, status}` from the
     `/sys/class/power_supply` entry whose HID parent's `uevent` has
-    `HID_UNIQ=<mac>`. That works whatever the driver names the supply.
+    `HID_UNIQ=<mac>`. That works whatever the driver names the supply. If
+    `HID_UNIQ` is missing or isn't a MAC (wired controllers can carry a USB
+    serial there), it falls back to a MAC in the supply's name, as with
+    hid-sony, hid-playstation and hid-nintendo (`ps-controller-battery-<mac>`
+    and similar). `-`/`_` separators are normalised to `:`.
     Batteries BlueZ itself reports come through Quickshell's
     `device.battery`, so the helper doesn't repeat them.
 - **`Panel.qml`** runs the helper through a Quickshell `Process`:
@@ -74,6 +78,9 @@ Upstream original, for comparison:
   Low, Normal, High, Full), or one per 20% when a percentage is available.
   - Colours are the theme's `Color.accent`, switching to `Color.urgent` at
     Low/Critical (20% or below).
+  - The charge state comes from the supply's `status`: Charging, Full
+    (shown as "Charged") or Not charging. Discharging/Unknown are omitted. It
+    applies even when BlueZ supplies the percentage.
   - Empty segments are the bar foreground at 18% opacity.
 - **Icons:** BlueZ icon names (`input-gaming`, `audio-headset`, …) map to
   Nerd Font Material glyphs. Unknown types keep the Bluetooth glyph.

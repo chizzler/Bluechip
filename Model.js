@@ -122,22 +122,38 @@ function titleCase(text) {
 // Linux power_supply capacity_level values, mapped onto a 5-segment gauge.
 var levelSegments = { critical: 1, low: 2, normal: 3, high: 4, full: 5 }
 
-// Gauge model for a row: { segments 0-5, low, label, charging }, or null when
-// nothing reports a battery. Percentages fill one segment per 20%.
+// Kernel power_supply status values worth showing next to the level.
+// "Discharging" and "Unknown" say nothing useful, so they map to "".
+var chargeStates = { "Charging": "Charging", "Full": "Charged", "Not charging": "Not charging" }
+
+// Gauge model for a row: { segments 0-5, low, label, state, charging }, or
+// null when nothing reports a battery. Percentages fill one segment per 20%.
+// The driver's status still applies when BlueZ supplies the percentage.
 function batteryLevel(row, extra) {
   var b = extra && extra.battery
   var pct = null
   if (row && row.batteryAvailable) pct = Math.round(row.battery * 100)
   else if (b && b.percent !== null && b.percent !== undefined) pct = b.percent
-  var charging = !!(b && b.status === "Charging")
+  var state = (b && chargeStates[b.status]) || ""
+  var level = null
 
   if (pct !== null) {
     pct = Math.max(0, Math.min(100, pct))
-    return { segments: Math.ceil(pct / 20), low: pct <= 20, label: pct + "%", charging: charging }
+    level = { segments: Math.ceil(pct / 20), low: pct <= 20, label: pct + "%" }
+  } else {
+    var key = b ? String(b.level || "").toLowerCase() : ""
+    if (!levelSegments[key]) return null
+    level = { segments: levelSegments[key], low: levelSegments[key] <= 2, label: titleCase(key) }
   }
-  var key = b ? String(b.level || "").toLowerCase() : ""
-  if (!levelSegments[key]) return null
-  return { segments: levelSegments[key], low: levelSegments[key] <= 2, label: titleCase(key), charging: charging }
+  level.state = state
+  level.charging = state === "Charging"
+  return level
+}
+
+// "Full", "80% · Charging", "Low · Not charging".
+function batteryLabel(level) {
+  if (!level) return ""
+  return level.state ? level.label + " · " + level.state : level.label
 }
 
 var deviceTypes = {
@@ -252,6 +268,7 @@ if (typeof module !== "undefined") {
     deviceRow: deviceRow,
     extraFor: extraFor,
     batteryLevel: batteryLevel,
+    batteryLabel: batteryLabel,
     deviceType: deviceType,
     deviceGlyph: deviceGlyph,
     deviceLists: deviceLists,
