@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.chizzler.bluechip",
+  "name": "Bluechip",
+  "version": "1.0.0",
+  "author": "Chizzler",
+  "description": "Bluetooth devices with a details card, rename, trust/block switches, device icons, and a battery gauge that includes controller batteries",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Bluechip",
+    "description": "Bluetooth devices with a details card, rename, trust/block switches, device icons, and a battery gauge that includes controller batteries",
+    "category": "Network",
+    "allowMultiple": false
+  },
+  "license": "MIT",
+  "omarchy": {
+    "clonedFrom": "omarchy.bluetooth"
+  }
+}

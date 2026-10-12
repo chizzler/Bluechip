@@ -168,6 +168,27 @@ var deviceTypes = {
   "network-wireless": "Network device"
 }
 
+// Nerd Font (Material Design) glyph per BlueZ icon name. Unknown types return
+// "" so the row keeps the plain Bluetooth glyph.
+var deviceGlyphs = {
+  "input-gaming": "󰊴",
+  "audio-headphones": "󰋋",
+  "audio-headset": "󰋎",
+  "audio-card": "󰓃",
+  "input-keyboard": "󰌌",
+  "input-mouse": "󰍽",
+  "input-tablet": "󰓶",
+  "phone": "󰄜",
+  "computer": "󰌢",
+  "video-display": "󰍹",
+  "camera-video": "󰄀",
+  "printer": "󰐪"
+}
+
+function deviceGlyph(icon) {
+  return deviceGlyphs[icon] || ""
+}
+
 function deviceType(icon) {
   if (!icon) return "Unknown"
   return deviceTypes[icon] || titleCase(String(icon).replace(/-/g, " "))
@@ -246,6 +267,7 @@ if (typeof module !== "undefined") {
     batteryText: batteryText,
     batteryLevel: batteryLevel,
     deviceType: deviceType,
+    deviceGlyph: deviceGlyph,
     deviceLists: deviceLists,
     cloneMap: cloneMap,
     pendingAction: pendingAction,

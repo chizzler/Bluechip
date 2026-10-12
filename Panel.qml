@@ -1090,7 +1090,7 @@ Panel {
       Text {
         id: deviceIcon
         textFormat: Text.PlainText
-        text: row.isConnected ? "󰂱" : "󰂯"
+        text: Model.deviceGlyph(row.dev ? row.dev.icon : "") || (row.isConnected ? "󰂱" : "󰂯")
         color: row.statusColor
         font.family: root.bar.fontFamily
         font.pixelSize: Style.font.heading
