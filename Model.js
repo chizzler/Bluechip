@@ -119,18 +119,6 @@ function titleCase(text) {
   return text.charAt(0).toUpperCase() + text.slice(1).toLowerCase()
 }
 
-// Battery text for a row: BlueZ percentage first, then whatever the input
-// driver publishes (often only a coarse level like "Full").
-function batteryText(row, extra) {
-  if (row && row.batteryAvailable) return Math.round(row.battery * 100) + "%"
-  var b = extra && extra.battery
-  if (!b) return ""
-  var text = b.percent !== null && b.percent !== undefined ? b.percent + "%" : titleCase(b.level)
-  if (text === "" || text === "Unknown") return ""
-  if (b.status === "Charging") text += ", charging"
-  return text
-}
-
 // Linux power_supply capacity_level values, mapped onto a 5-segment gauge.
 var levelSegments = { critical: 1, low: 2, normal: 3, high: 4, full: 5 }
 
@@ -263,8 +251,6 @@ if (typeof module !== "undefined") {
     sortedByLabel: sortedByLabel,
     deviceRow: deviceRow,
     extraFor: extraFor,
-    titleCase: titleCase,
-    batteryText: batteryText,
     batteryLevel: batteryLevel,
     deviceType: deviceType,
     deviceGlyph: deviceGlyph,

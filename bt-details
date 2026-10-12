@@ -1,52 +1,70 @@
 #!/bin/bash
 # Usage: bt-details <mac>...
-# Prints one JSON object keyed by lowercase MAC with the details BlueZ's
-# D-Bus device doesn't surface to Quickshell: profiles, hardware IDs, and
-# battery published by an input driver (xpadneo, hid-playstation, ...)
-# under /sys/class/power_supply rather than through BlueZ's Battery1.
+# Prints one JSON object keyed by lowercase MAC with the details Quickshell's
+# BluetoothDevice doesn't expose: profile names and hardware ID (read from
+# BlueZ over D-Bus), and battery published by an input driver (xpadneo,
+# hid-playstation, ...) under /sys/class/power_supply rather than through
+# BlueZ's Battery1.
 
 set -u
 
-json_device() {
-  local mac=${1,,} info battery_json="null" profiles modalias vid pid bt_pct
+# Driver batteries. The power_supply's HID parent records the Bluetooth MAC as
+# HID_UNIQ, whatever the driver names the supply. One line per battery:
+# mac, source, capacity, capacity_level, status (tab-separated).
+batteries=""
+for ps in /sys/class/power_supply/*; do
+  [[ -r $ps/device/uevent ]] || continue
+  mac=""
+  while IFS='=' read -r key value; do
+    [[ $key == HID_UNIQ ]] && mac=${value,,}
+  done <"$ps/device/uevent"
+  [[ -n $mac ]] || continue
 
-  info=$(bluetoothctl info "$1" 2>/dev/null)
+  capacity="" level="" status=""
+  [[ -r $ps/capacity ]] && read -r capacity <"$ps/capacity"
+  [[ -r $ps/capacity_level ]] && read -r level <"$ps/capacity_level"
+  [[ -r $ps/status ]] && read -r status <"$ps/status"
+  batteries+="$mac"$'\t'"${ps##*/}"$'\t'"$capacity"$'\t'"$level"$'\t'"$status"$'\n'
+done
 
-  profiles=$(sed -n 's/^[[:space:]]*UUID: \(.*\) (.*)$/\1/p' <<<"$info" \
-    | sed 's/\.\.\.$//; s/[[:space:]]*$//' | jq -R . | jq -sc .)
-  modalias=$(sed -n 's/^[[:space:]]*Modalias: //p' <<<"$info")
-  vid=$(sed -n 's/.*v\([0-9A-Fa-f]\{4\}\)p.*/\1/p' <<<"$modalias")
-  pid=$(sed -n 's/.*p\([0-9A-Fa-f]\{4\}\)d.*/\1/p' <<<"$modalias")
-  bt_pct=$(sed -n 's/^[[:space:]]*Battery Percentage: 0x[0-9a-f]* (\([0-9]*\))/\1/p' <<<"$info")
+objects=$(busctl --system --json=short call org.bluez / \
+  org.freedesktop.DBus.ObjectManager GetManagedObjects 2>/dev/null) || objects='{"data":[{}]}'
 
-  # Driver-reported battery: the power_supply's name or model_name carries the MAC.
-  local ps name model
-  for ps in /sys/class/power_supply/*; do
-    [[ -e $ps ]] || continue
-    name=${ps##*/}
-    model=$(cat "$ps/model_name" 2>/dev/null)
-    if [[ ${name,,} == *"$mac"* || ${model,,} == *"$mac"* ]]; then
-      battery_json=$(jq -nc \
-        --arg percent "$(cat "$ps/capacity" 2>/dev/null)" \
-        --arg level "$(cat "$ps/capacity_level" 2>/dev/null)" \
-        --arg status "$(cat "$ps/status" 2>/dev/null)" \
-        --arg source "$name" \
-        '{percent: ($percent | if . == "" then null else tonumber end),
-          level: $level, status: $status, source: $source}')
-      break
-    fi
-  done
+jq -c --arg batteries "$batteries" '
+  # Names for the common Bluetooth SIG 16-bit service UUIDs.
+  def names: {
+    "1101": "Serial Port", "1105": "Object Push", "1108": "Headset",
+    "110a": "Audio Source", "110b": "Audio Sink",
+    "110c": "Remote Control Target", "110e": "Remote Control",
+    "110f": "Remote Control Controller", "1112": "Headset Gateway",
+    "111e": "Hands-Free", "111f": "Hands-Free Gateway",
+    "1124": "Human Interface Device", "112f": "Phonebook Access",
+    "1132": "Message Access", "1200": "PnP Information",
+    "1800": "Generic Access", "1801": "Generic Attribute",
+    "180a": "Device Information", "180f": "Battery Service",
+    "1812": "HID over GATT"
+  };
+  def profile:
+    ascii_downcase
+    | if test("^0000[0-9a-f]{4}-0000-1000-8000-00805f9b34fb$")
+      then .[4:8] as $short | names[$short] // ("0x" + $short)
+      else . end;
 
-  if [[ $battery_json == null && -n $bt_pct ]]; then
-    battery_json=$(jq -nc --argjson p "$bt_pct" '{percent: $p, level: "", status: "", source: "bluez"}')
-  fi
-
-  jq -nc --arg mac "$mac" --argjson profiles "${profiles:-[]}" \
-    --arg vid "${vid^^}" --arg pid "${pid^^}" --argjson battery "$battery_json" \
-    '{($mac): {profiles: $profiles, hardwareId: (if $vid == "" then "" else "\($vid):\($pid)" end), battery: $battery}}'
-}
-
-for mac in "$@"; do
-  [[ $mac =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]] || continue
-  json_device "$mac"
-done | jq -sc 'add // {}'
+  ($batteries | split("\n") | map(select(. != "") | split("\t") | {
+      key: .[0],
+      value: {source: .[1], percent: (.[2] | if . == "" then null else tonumber end),
+              level: .[3], status: .[4]}
+    }) | from_entries) as $battery
+  | ($ARGS.positional | map(ascii_downcase)) as $wanted
+  | [ .data[0][] | .["org.bluez.Device1"] // empty
+      | (.Address.data | ascii_downcase) as $mac
+      | select(any($wanted[]; . == $mac))
+      | ((.Modalias.data // "") | [capture("v(?<vid>[0-9A-Fa-f]{4})p(?<pid>[0-9A-Fa-f]{4})")] | .[0]) as $ids
+      | {key: $mac, value: {
+          profiles: [(.UUIDs.data // [])[] | profile],
+          hardwareId: (if $ids then "\($ids.vid | ascii_upcase):\($ids.pid | ascii_upcase)" else "" end),
+          battery: ($battery[$mac] // null)
+        }}
+    ]
+  | from_entries
+' --args "$@" <<<"$objects"

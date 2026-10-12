@@ -44,19 +44,27 @@ Upstream original, for comparison:
 
 ## How it works
 
-- **`bt-details <mac>…`** prints JSON keyed by lowercase MAC:
-  - `profiles`: the UUID names from `bluetoothctl info`
-  - `hardwareId`: `VID:PID` from the Modalias
-  - `battery`: `{percent, level, status, source}`, from the
-    `/sys/class/power_supply/*` entry whose name or `model_name` contains the
-    MAC. Falls back to BlueZ's "Battery Percentage".
-- **`Panel.qml`** runs the helper with a Quickshell `Process`:
+- **`bt-details <mac>…`** prints JSON keyed by lowercase MAC. It runs three
+  processes in total (bash, one `busctl`, one `jq`), however many devices
+  there are.
+  - `profiles` and `hardwareId`: read from BlueZ's `Device1` properties
+    (`UUIDs`, `Modalias`) with a single `ObjectManager.GetManagedObjects`
+    call. Common SIG UUIDs map to names; others show as `0x….`
+  - `battery`: `{source, percent, level, status}` from the
+    `/sys/class/power_supply` entry whose HID parent's `uevent` has
+    `HID_UNIQ=<mac>`. That works whatever the driver names the supply.
+    Batteries BlueZ itself reports come through Quickshell's
+    `device.battery`, so the helper doesn't repeat them.
+- **`Panel.qml`** runs the helper through a Quickshell `Process`:
   - when the panel opens
   - every 10 s while it's open
-  - when connections change
+  - when the set of connected devices changes (`connectedKey`), not on every
+    list update during a scan
 
-  It covers connected devices plus the one whose details card is open. Results
-  land in `extras`.
+  It covers connected devices plus the one whose card is open. An identical
+  result is ignored, so bindings don't re-run for nothing.
+- **Details cards** are built by a `Loader` only while open, so at most one
+  exists.
 - **Rename / Trusted / Blocked** write `name`, `trusted` and `blocked` on
   Quickshell's `BluetoothDevice`. These map directly onto BlueZ `Device1`
   properties. An empty name clears the alias.

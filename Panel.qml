@@ -38,9 +38,9 @@ Panel {
   // details (driver battery, profiles, hardware ID) from the bt-details helper.
   property string expandedAddress: ""
   property string renamingAddress: ""
-  property string renameText: ""
   property var extras: ({})
   property bool detailsDirty: false
+  property string extrasText: ""
   readonly property string detailsHelper: String(Qt.resolvedUrl("bt-details")).replace(/^file:\/\//, "")
 
   function deviceLabel(device) {
@@ -169,13 +169,7 @@ Panel {
   // dangle mid-incubation. `devices` is already the raw device array (see the
   // property declaration), so it is iterated directly.
   function deviceFor(row) {
-    if (!row || !row.dev) return null
-    var addr = row.dev.address || ""
-    var devs = devices || []
-    for (var i = 0; i < devs.length; i++) {
-      if ((devs[i].address || "") === addr) return devs[i]
-    }
-    return null
+    return row && row.dev ? deviceForAddress(row.dev.address || "") : null
   }
 
   // Flat position of the keyboard cursor, or -1 while it sits on the hero or
@@ -323,15 +317,14 @@ Panel {
     var dev = deviceForAddress(address)
     if (!dev) return
     expandedAddress = address
-    renameText = Model.deviceLabel(dev)
     renamingAddress = address
   }
 
   // Writes the BlueZ alias. An empty name clears it, so BlueZ falls back to
   // the name the device advertises.
-  function commitRename() {
+  function commitRename(text) {
     var dev = deviceForAddress(renamingAddress)
-    if (dev) dev.name = renameText.trim()
+    if (dev) dev.name = String(text || "").trim()
     renamingAddress = ""
   }
 
@@ -339,14 +332,10 @@ Panel {
     renamingAddress = ""
   }
 
-  function setTrusted(address, on) {
+  // key is a writable BluetoothDevice flag: "trusted" or "blocked".
+  function setDeviceFlag(address, key, on) {
     var dev = deviceForAddress(address)
-    if (dev) dev.trusted = on
-  }
-
-  function setBlocked(address, on) {
-    var dev = deviceForAddress(address)
-    if (dev) dev.blocked = on
+    if (dev) dev[key] = on
   }
 
   // Connected devices (for battery) plus whichever card is open.
@@ -544,7 +533,11 @@ Panel {
 
   onSelectedIndexChanged: updateFocusedAddress()
   onFocusSectionChanged: updateFocusedAddress()
-  onConnectedDevicesChanged: { reselectFocusedDevice(); syncPendingActions(); refreshDetails() }
+  onConnectedDevicesChanged: { reselectFocusedDevice(); syncPendingActions() }
+  // connectedDevices is rebuilt on every list change during a scan; the
+  // string only changes when the set of connected devices does.
+  readonly property string connectedKey: connectedDevices.map(function(d) { return d.address }).join(",")
+  onConnectedKeyChanged: refreshDetails()
   onKnownDevicesChanged: { reselectFocusedDevice(); syncPendingActions() }
   onDiscoveredDevicesChanged: { reselectFocusedDevice(); syncPendingActions() }
   onVisibleSectionsChanged: clampCursor()
@@ -677,7 +670,9 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        try { root.extras = JSON.parse(String(text || "{}")) } catch (e) {}
+        var json = String(text || "").trim()
+        if (json === root.extrasText) return
+        try { root.extras = JSON.parse(json || "{}"); root.extrasText = json } catch (e) {}
       }
     }
     onExited: {
@@ -1205,10 +1200,14 @@ Panel {
       isDiscovered: entry.isDiscovered
     }
 
-    DeviceDetails {
+    // Built only while open, so at most one card exists.
+    Loader {
       width: entry.width
-      visible: !!entry.dev && root.expandedAddress === entry.dev.address
-      dev: entry.dev
+      active: !!entry.dev && root.expandedAddress === entry.dev.address
+      visible: active
+      sourceComponent: Component {
+        DeviceDetails { dev: entry.dev }
+      }
     }
   }
 
@@ -1217,7 +1216,7 @@ Panel {
     id: gauge
     property var level: null
     readonly property color fillColor: level && level.low ? Color.urgent : Color.accent
-    readonly property color emptyColor: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.18)
+    readonly property color emptyColor: Util.alpha(root.bar.foreground, 0.18)
     spacing: Style.space(6)
 
     Row {
@@ -1270,7 +1269,8 @@ Panel {
 
     readonly property var facts: {
       if (!dev) return []
-      var battery = Model.batteryText(dev, extra)
+      var level = Model.batteryLevel(dev, extra)
+      var battery = level ? level.label + (level.charging ? ", charging" : "") : ""
       var status = dev.connected ? "Connected" : (dev.paired || dev.bonded ? "Paired" : "Not paired")
       var list = [
         ["Type", Model.deviceType(dev.icon)],
@@ -1344,12 +1344,17 @@ Panel {
           foreground: root.bar.foreground
           horizontalPadding: Style.spacing.controlGap
           verticalPadding: Style.spacing.controlPaddingY
-          text: card.renaming ? root.renameText : ""
+          // Seed with the current name each time the field opens. The card can
+          // be created already renaming (r on a collapsed row), so also on load.
+          function begin() {
+            text = root.deviceLabel(card.dev)
+            Qt.callLater(function() { renameField.forceActiveFocus(); renameField.selectAll() })
+          }
 
-          onTextChanged: if (card.renaming && text !== root.renameText) root.renameText = text
-          onAccepted: root.commitRename()
+          onAccepted: root.commitRename(text)
           Keys.onEscapePressed: root.cancelRename()
-          onVisibleChanged: if (visible) Qt.callLater(function() { renameField.forceActiveFocus(); renameField.selectAll() })
+          onVisibleChanged: if (visible) begin()
+          Component.onCompleted: if (visible) begin()
         }
 
         PanelActionButton {
@@ -1361,7 +1366,7 @@ Panel {
           foreground: root.bar.foreground
           hoverColor: root.bar.foreground
           fontFamily: root.bar.fontFamily
-          onClicked: root.commitRename()
+          onClicked: root.commitRename(renameField.text)
         }
       }
 
@@ -1376,7 +1381,6 @@ Panel {
             text: modelData[0].toUpperCase()
           }
           DetailValue {
-            id: factValue
             width: parent.width - card.labelWidth - parent.spacing
             text: modelData[1]
           }
@@ -1392,7 +1396,7 @@ Panel {
         label: "Trusted"
         hint: "Reconnects automatically without asking"
         checked: !!card.dev && card.dev.trusted
-        onToggled: if (card.dev) root.setTrusted(card.dev.address, !card.dev.trusted)
+        onToggled: root.setDeviceFlag(card.dev.address, "trusted", !card.dev.trusted)
       }
 
       DetailSwitch {
@@ -1400,7 +1404,7 @@ Panel {
         label: "Blocked"
         hint: "Refuses all connections from this device"
         checked: !!card.dev && card.dev.blocked
-        onToggled: if (card.dev) root.setBlocked(card.dev.address, !card.dev.blocked)
+        onToggled: root.setDeviceFlag(card.dev.address, "blocked", !card.dev.blocked)
       }
     }
   }
