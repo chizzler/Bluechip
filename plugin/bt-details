@@ -1,0 +1,52 @@
+#!/bin/bash
+# Usage: bt-details <mac>...
+# Prints one JSON object keyed by lowercase MAC with the details BlueZ's
+# D-Bus device doesn't surface to Quickshell: profiles, hardware IDs, and
+# battery published by an input driver (xpadneo, hid-playstation, ...)
+# under /sys/class/power_supply rather than through BlueZ's Battery1.
+
+set -u
+
+json_device() {
+  local mac=${1,,} info battery_json="null" profiles modalias vid pid bt_pct
+
+  info=$(bluetoothctl info "$1" 2>/dev/null)
+
+  profiles=$(sed -n 's/^[[:space:]]*UUID: \(.*\) (.*)$/\1/p' <<<"$info" \
+    | sed 's/\.\.\.$//; s/[[:space:]]*$//' | jq -R . | jq -sc .)
+  modalias=$(sed -n 's/^[[:space:]]*Modalias: //p' <<<"$info")
+  vid=$(sed -n 's/.*v\([0-9A-Fa-f]\{4\}\)p.*/\1/p' <<<"$modalias")
+  pid=$(sed -n 's/.*p\([0-9A-Fa-f]\{4\}\)d.*/\1/p' <<<"$modalias")
+  bt_pct=$(sed -n 's/^[[:space:]]*Battery Percentage: 0x[0-9a-f]* (\([0-9]*\))/\1/p' <<<"$info")
+
+  # Driver-reported battery: the power_supply's name or model_name carries the MAC.
+  local ps name model
+  for ps in /sys/class/power_supply/*; do
+    [[ -e $ps ]] || continue
+    name=${ps##*/}
+    model=$(cat "$ps/model_name" 2>/dev/null)
+    if [[ ${name,,} == *"$mac"* || ${model,,} == *"$mac"* ]]; then
+      battery_json=$(jq -nc \
+        --arg percent "$(cat "$ps/capacity" 2>/dev/null)" \
+        --arg level "$(cat "$ps/capacity_level" 2>/dev/null)" \
+        --arg status "$(cat "$ps/status" 2>/dev/null)" \
+        --arg source "$name" \
+        '{percent: ($percent | if . == "" then null else tonumber end),
+          level: $level, status: $status, source: $source}')
+      break
+    fi
+  done
+
+  if [[ $battery_json == null && -n $bt_pct ]]; then
+    battery_json=$(jq -nc --argjson p "$bt_pct" '{percent: $p, level: "", status: "", source: "bluez"}')
+  fi
+
+  jq -nc --arg mac "$mac" --argjson profiles "${profiles:-[]}" \
+    --arg vid "${vid^^}" --arg pid "${pid^^}" --argjson battery "$battery_json" \
+    '{($mac): {profiles: $profiles, hardwareId: (if $vid == "" then "" else "\($vid):\($pid)" end), battery: $battery}}'
+}
+
+for mac in "$@"; do
+  [[ $mac =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]] || continue
+  json_device "$mac"
+done | jq -sc 'add // {}'

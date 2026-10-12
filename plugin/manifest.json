@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "chee.bluetooth",
+  "name": "My Bluetooth",
+  "version": "1.0.0",
+  "author": "Omarchy",
+  "description": "Bluetooth devices with details, rename, trust/block, and driver battery",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "My Bluetooth",
+    "description": "Bluetooth devices with details, rename, trust/block, and driver battery",
+    "category": "Network",
+    "allowMultiple": false
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.bluetooth"
+  }
+}
