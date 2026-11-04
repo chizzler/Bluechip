@@ -6,6 +6,7 @@ import Quickshell.Bluetooth
 import Quickshell.Services.Pipewire
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "Model.js" as Model
 
 Panel {
@@ -42,6 +43,18 @@ Panel {
   property bool detailsDirty: false
   property string extrasText: ""
   readonly property string detailsHelper: String(Qt.resolvedUrl("bt-details")).replace(/^file:\/\//, "")
+
+  // Connect/pair feedback. omarchy-bluetooth-device swallows bluetoothctl's
+  // errors, so a failure is read from the device state once the helper exits.
+  //   runningConnects: address -> true while a helper this instance started runs
+  //   failures:        address -> { message } shown on the row
+  property var runningConnects: ({})
+  property var failures: ({})
+  readonly property int connectGraceMs: 1500
+  readonly property int failureShowMs: 6000
+
+  // Device the forget dialog is asking about: { address, label }, or null.
+  property var forgetTarget: null
 
   function deviceLabel(device) {
     return Model.deviceLabel(device)
@@ -113,10 +126,10 @@ Panel {
   readonly property string toggleHint: root.adapter && root.adapter.enabled ? "Turn Bluetooth off" : "Turn Bluetooth on"
 
   readonly property color hoverFill: bar
-    ? Style.hoverFillFor(bar.foreground, Color.accent)
+    ? Style.hoverFillFor(bar.foreground, Commons.Color.accent)
     : "transparent"
   readonly property color selectedFill: bar
-    ? Style.selectedFillFor(bar.foreground, Color.accent)
+    ? Style.selectedFillFor(bar.foreground, Commons.Color.accent)
     : "transparent"
 
   function sectionCount(section) {
@@ -277,9 +290,67 @@ Panel {
   }
 
   function connectDevice(device) {
-    if (!device || device.connected) return
-    if (device.paired || device.bonded || device.trusted) runDeviceAction(device, "connect", "connecting")
-    else runDeviceAction(device, "pair", "connecting")
+    if (!device || !device.address || device.connected) return
+    // A second click while one attempt runs would start a second helper.
+    if (runningConnects[device.address]) return
+    var action = device.paired || device.bonded || device.trusted ? "connect" : "pair"
+    var address = device.address
+    clearFailure(address)
+    setPendingAction(address, "connecting")
+    runningConnects = Model.withEntry(runningConnects, address, true)
+    var proc = connectProcess.createObject(root, { address: address, helperAction: action })
+    // setsid puts the helper in its own session, so a shell restart (which
+    // kills this Process) cannot cut a pairing off halfway. `wait` keeps the
+    // Process alive until the helper exits, which is what onExited reports.
+    proc.command = ["sh", "-c", "setsid \"$@\" & wait $!", "sh"].concat(deviceCommand(action, address))
+    proc.running = true
+  }
+
+  // Called once the grace period after a helper exit is over. A device that
+  // still has not connected failed, unless something else has taken over its
+  // row: success clears the "connecting" mark (syncPendingActions), and so
+  // does any later action such as a forget. Returns the failure entry it
+  // recorded, or null.
+  function failConnect(address, action) {
+    var dev = deviceForAddress(address)
+    if (!dev || dev.connected || runningConnects[address]) return null
+    if (pendingAction(address) !== "connecting") return null
+    setPendingAction(address, "")
+    var entry = { message: action === "pair" && !(dev.paired || dev.bonded) ? "Couldn't pair" : "Couldn't connect" }
+    failures = Model.withEntry(failures, address, entry)
+    return entry
+  }
+
+  function failureFor(address) {
+    var f = address ? failures[address] : null
+    return f ? f.message : ""
+  }
+
+  // With entry, clears only that failure, so an older attempt's expiry never
+  // removes the message of a newer one on the same device.
+  function clearFailure(address, entry) {
+    var current = failures[address]
+    if (current && (!entry || current === entry)) failures = Model.withEntry(failures, address, null)
+  }
+
+  // Every way to forget (button, x, right-click) asks first: a forgotten
+  // device has to be paired again from scratch.
+  function requestForget(device) {
+    if (!device || !device.address) return
+    if (renamingAddress !== "") cancelRename()
+    forgetConfirm.selectedIndex = 1
+    forgetTarget = { address: device.address, label: deviceLabel(device) || "this device" }
+    Qt.callLater(function() { if (root.forgetTarget) forgetKeys.forceActiveFocus() })
+  }
+
+  function confirmForget() {
+    var target = forgetTarget
+    forgetTarget = null
+    if (target) forgetDevice(deviceForAddress(target.address))
+  }
+
+  function cancelForget() {
+    forgetTarget = null
   }
 
   function disconnectDevice(device) {
@@ -461,13 +532,14 @@ Panel {
     }
   }
 
-  // 'x' forgets remembered devices. For connected devices this first
-  // disconnects, then removes the BlueZ pairing record via omarchy-bluetooth-device.
+  // 'x' forgets remembered devices, after confirmation. For connected devices
+  // this first disconnects, then removes the BlueZ pairing record via
+  // omarchy-bluetooth-device.
   function deleteSelected() {
     if (focusSection !== "known" && focusSection !== "connected") return
     var dev = deviceAt(focusSection, selectedIndex)
     if (!dev) return
-    forgetDevice(dev)
+    requestForget(dev)
   }
 
   onOpenedChanged: {
@@ -486,7 +558,14 @@ Panel {
     } else {
       renamingAddress = ""
       expandedAddress = ""
+      forgetTarget = null
     }
+  }
+
+  // Hand keys back to the panel cursor once the forget dialog closes.
+  onForgetTargetChanged: {
+    if (forgetTarget === null && opened)
+      Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
   }
 
   // Another per-monitor instance of this widget whose panel is open, if any.
@@ -650,11 +729,52 @@ Panel {
     if (adapter !== null && adapter.discovering) adapter.discovering = false
   }
 
+  // Safety net for actions BlueZ never confirms. Connects whose helper is
+  // still running are kept: pairing can take over 40 s, and their outcome
+  // arrives when their connectProcess exits instead.
   Timer {
     id: pendingTimeout
     interval: 20000
     repeat: false
-    onTriggered: root.pendingActions = ({})
+    onTriggered: {
+      var next = ({})
+      for (var address in root.pendingActions)
+        if (root.runningConnects[address]) next[address] = root.pendingActions[address]
+      root.pendingActions = next
+      if (Object.keys(next).length > 0) restart()
+    }
+  }
+
+  // One helper run per connect or pair; see connectDevice. The object lives on
+  // after the helper exits: settle waits out the grace period for BlueZ to
+  // report Connected, then, if the attempt failed, how long the message shows.
+  Component {
+    id: connectProcess
+    Process {
+      id: attempt
+      property string address: ""
+      property string helperAction: ""
+      property var failure: null
+
+      property Timer settle: Timer {
+        interval: root.connectGraceMs
+        onTriggered: {
+          if (!attempt.failure) {
+            attempt.failure = root.failConnect(attempt.address, attempt.helperAction)
+            if (attempt.failure) { interval = root.failureShowMs; start(); return }
+          } else {
+            root.clearFailure(attempt.address, attempt.failure)
+          }
+          attempt.destroy()
+        }
+      }
+
+      onExited: {
+        root.runningConnects = Model.withEntry(root.runningConnects, address, null)
+        if (root.pendingAction(address) === "connecting") settle.start()
+        else destroy()
+      }
+    }
   }
 
   Timer {
@@ -766,13 +886,16 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight)
+    // Room for the forget dialog even when the device list is short.
+    contentHeight: panel.fittedContentHeight(root.forgetTarget !== null
+      ? Math.max(column.implicitHeight, Style.space(170))
+      : column.implicitHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      // The rename field owns input until Enter/Esc.
-      blocked: root.renamingAddress !== ""
+      // The rename field and the forget dialog own input while open.
+      blocked: root.renamingAddress !== "" || root.forgetTarget !== null
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) { root.cursorActive = true; return }
         if (dy !== 0) root.moveCursor(dy)
@@ -982,6 +1105,44 @@ Panel {
           width: parent.width
         }
       }
+
+      // Forget confirmation, over the whole panel.
+      Item {
+        anchors.fill: parent
+        z: 10
+        visible: root.forgetTarget !== null
+
+        // Stops rows underneath reacting to hover while the dialog is up.
+        MouseArea {
+          anchors.fill: parent
+          hoverEnabled: true
+          acceptedButtons: Qt.NoButton
+        }
+
+        ConfirmDialog {
+          id: forgetConfirm
+          anchors.fill: parent
+          opened: root.forgetTarget !== null
+          message: root.forgetTarget
+            ? "Forget " + root.forgetTarget.label + "? You'll need to pair it again to use it."
+            : ""
+          confirmText: "Forget"
+          foreground: root.bar.foreground
+          fontFamily: root.bar.fontFamily
+          onCanceled: root.cancelForget()
+          onConfirmed: root.confirmForget()
+        }
+
+        // Takes focus while the dialog is open. Every key stops here, so
+        // nothing reaches the device list behind it.
+        Item {
+          id: forgetKeys
+          Keys.onPressed: function(event) {
+            forgetConfirm.handleKey(event)
+            event.accepted = true
+          }
+        }
+      }
     }
   }
 
@@ -1028,9 +1189,14 @@ Panel {
         return sectionName === "connected" ? "" : "Connected"
       }
       if (action === "connecting" || devState === 3 || dev.pairing === true) return "Connecting…"
-      if (isDiscovered) return ""
+      if (failure !== "") return failure
       return ""
     }
+
+    // "Couldn't connect" / "Couldn't pair" after a failed attempt, for a few
+    // seconds. Any newer state above takes the row back.
+    readonly property string failure: root.failureFor(dev ? dev.address : "")
+    readonly property bool showingFailure: failure !== "" && statusText === failure
 
     readonly property color statusColor: {
       if (isConnected) return root.bar.foreground
@@ -1059,7 +1225,7 @@ Panel {
         if (!dev) return
         if (mouse.button === Qt.RightButton) {
           if (row.isConnected) root.disconnectDevice(dev)
-          else if (!row.isDiscovered) root.forgetDevice(dev)
+          else if (!row.isDiscovered) root.requestForget(dev)
           return
         }
         if (row.isConnected) root.disconnectDevice(dev)
@@ -1119,7 +1285,7 @@ Panel {
           textFormat: Text.PlainText
           visible: row.statusText !== ""
           text: row.statusText
-          color: row.statusColor
+          color: row.showingFailure ? Commons.Color.urgent : row.statusColor
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
@@ -1176,7 +1342,7 @@ Panel {
         onClicked: {
           var dev = root.deviceFor(row)
           if (!dev) return
-          root.forgetDevice(dev)
+          root.requestForget(dev)
         }
       }
       }
@@ -1215,7 +1381,7 @@ Panel {
   component BatteryGauge: Row {
     id: gauge
     property var level: null
-    readonly property color fillColor: level && level.low ? Color.urgent : Color.accent
+    readonly property color fillColor: level && level.low ? Commons.Color.urgent : Commons.Color.accent
     readonly property color emptyColor: Util.alpha(root.bar.foreground, 0.18)
     spacing: Style.space(6)
 
@@ -1238,7 +1404,7 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
       text: (gauge.level && gauge.level.charging ? "󱐋 " : "") + Model.batteryLabel(gauge.level)
-      color: gauge.level && gauge.level.low ? Color.urgent : Qt.darker(root.bar.foreground, 1.3)
+      color: gauge.level && gauge.level.low ? Commons.Color.urgent : Qt.darker(root.bar.foreground, 1.3)
       font.family: root.bar.fontFamily
       font.pixelSize: Style.font.caption
     }
@@ -1284,7 +1450,7 @@ Panel {
     }
 
     color: Style.normalFillFor(root.bar.foreground)
-    borderSpec: Border.controlSpec("normal", root.bar.foreground, Color.accent)
+    borderSpec: Border.controlSpec("normal", root.bar.foreground, Commons.Color.accent)
     radius: Style.cornerRadius
     implicitHeight: details.implicitHeight + Style.space(20)
 

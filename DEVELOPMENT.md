@@ -82,6 +82,31 @@ Upstream original, for comparison:
     (shown as "Charged") or Not charging. Discharging/Unknown are omitted. It
     applies even when BlueZ supplies the percentage.
   - Empty segments are the bar foreground at 18% opacity.
+- **Connect feedback:** `omarchy-bluetooth-device` ends every `bluetoothctl`
+  call with `|| true`, so its exit code says nothing. Connect and pair run it
+  through a Quickshell `Process` (one per attempt, made from the
+  `connectProcess` component) only to learn when it has finished.
+  - The command is `sh -c 'setsid "$@" & wait $!'`. A destroyed `Process`
+    kills its child, and a shell restart destroys it. `setsid` gives the
+    helper its own session so it survives, and `wait` keeps the `Process`
+    running until the helper exits.
+  - When it exits and the device is still marked "connecting", the panel
+    waits 1.5 s for BlueZ to report Connected. If it doesn't, the row shows
+    "Couldn't pair" (a pair that left the device unpaired) or "Couldn't
+    connect" for 6 s. One `settle` timer on the attempt's `Process` handles
+    both waits, then the `Process` destroys itself.
+  - Known gap: a device that connects and drops again within the 1.5 s
+    shows "Couldn't connect". Exact results would need a Bluechip-owned
+    helper that reports `bluetoothctl`'s real outcome, which would duplicate
+    Omarchy's helper.
+  - A second connect on the same device while a helper runs is ignored.
+  - `pendingTimeout` (20 s) keeps entries whose helper is still running,
+    because a pair can take over 40 s.
+- **Forget confirmation:** the forget button, `x` and right-click all call
+  `requestForget`, which opens the shell's `ConfirmDialog` over the panel.
+  While it's open, `forgetKeys` holds focus and swallows every key, and
+  `PanelKeyCatcher` is blocked. The panel grows to at least
+  `Style.space(170)` so the dialog isn't clipped.
 - **Icons:** BlueZ icon names (`input-gaming`, `audio-headset`, …) map to
   Nerd Font Material glyphs. Unknown types keep the Bluetooth glyph.
 
@@ -95,8 +120,9 @@ Upstream original, for comparison:
 - **`console.log` output from the plugin doesn't reach `quickshell log`.** To
   inspect state, add a temporary `IpcHandler` with a function that returns a
   string, and call it with `omarchy-shell <target> <function>`.
-- **The panel grabs the keyboard while it's open, and `x` forgets the selected
-  device.** When testing with `wtype`, close the panel in the same command.
+- **The panel grabs the keyboard while it's open, and `x` then `Enter`
+  forgets the selected device.** When testing with `wtype`, close the panel in
+  the same command.
 - **The panel opens on the focused monitor.** Screenshot that one.
 - **QML `visible` trap:** a child reads as hidden while its parent is hidden.
   Never bind a container's `visible` to its children's `visible`.
@@ -112,4 +138,5 @@ Upstream original, for comparison:
 ## Keeping up with upstream
 
 After Omarchy updates, compare `Panel.qml` and `Model.js` with the upstream
-copies and bring over relevant fixes.
+copies and bring over relevant fixes. Last synced with Omarchy 4.0.6
+(`Color` is now qualified as `Commons.Color`, as upstream does).

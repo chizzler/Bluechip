@@ -14,6 +14,11 @@ follows your theme, and sits in the same place in the bar.
 
 - **Everything the built-in panel does:** power toggle, scan, pair, connect,
   disconnect and forget.
+- **Forget asks first.** The forget button, `x` and right-click all show a
+  confirmation, because a forgotten device has to be paired again.
+- **Failed connections say so.** If a connect or pair doesn't work, the row
+  shows "Couldn't connect" or "Couldn't pair" for a few seconds, instead of
+  quietly going back to normal.
 - **Battery gauge** under each connected device. It has five segments in your
   theme's accent colour, turning to the theme's urgent colour when low.
   - Battery comes from Bluetooth when the device reports it there, or from the
@@ -35,7 +40,8 @@ follows your theme, and sits in the same place in the bar.
 - **Trusted switch**, so the device reconnects automatically without asking,
   and a **Blocked switch** to refuse all connections from it.
 - **Keyboard:** `j`/`k` move, `Enter` connects or disconnects, `i` toggles
-  details, `r` renames, `x` forgets, `b` toggles Bluetooth, `Esc` closes.
+  details, `r` renames, `x` forgets (after a confirmation), `b` toggles
+  Bluetooth, `Esc` closes.
 - **Shortcut:** the default `Super+Ctrl+B` opens Bluechip once it's enabled.
 
 ## Requirements

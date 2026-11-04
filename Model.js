@@ -230,10 +230,16 @@ function pendingAction(actions, address) {
 }
 
 function withPendingAction(actions, address, action) {
-  var next = cloneMap(actions)
-  if (!address) return next
-  if (action) next[address] = action
-  else delete next[address]
+  return withEntry(actions, address, action || null)
+}
+
+// Copy of map with key set to value, or removed when value is null/undefined.
+// A new object, so QML bindings that read the map re-evaluate.
+function withEntry(map, key, value) {
+  var next = cloneMap(map)
+  if (!key) return next
+  if (value === null || value === undefined) delete next[key]
+  else next[key] = value
   return next
 }
 
