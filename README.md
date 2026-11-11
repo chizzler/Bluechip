@@ -85,8 +85,7 @@ This removes the plugin and restores Omarchy's built-in Bluetooth widget.
   other configuration.
 - Battery details come from a small read-only helper (`bt-details`). It runs
   only while the panel is open: when it opens, every 10 seconds, and when
-  connections change. It reads `bluetoothctl info` and
-  `/sys/class/power_supply`.
+  connections change. It reads BlueZ over D-Bus and `/sys/class/power_supply`.
 - A device shows a battery gauge only if its driver or Bluetooth reports a
   battery.
 
@@ -95,4 +94,5 @@ This removes the plugin and restores Omarchy's built-in Bluetooth widget.
 MIT. See [LICENSE](LICENSE). Bluechip is derived from Omarchy's built-in
 Bluetooth widget (MIT, © David Heinemeier Hansson).
 
+Project overview and performance notes are in [PROJECT.md](PROJECT.md).
 Development notes are in [DEVELOPMENT.md](DEVELOPMENT.md).

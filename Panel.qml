@@ -13,7 +13,7 @@ Panel {
   id: root
   moduleName: "omarchy.bluetooth"
   ipcTarget: "omarchy.bluetooth"
-  // manageIpc: false so this panel can own the single IpcHandler the target
+  // manageIpc: false so this panel can own the single ShellIpc the target
   // permits — needed for the toggleBluetooth method below.
   manageIpc: false
 
@@ -31,7 +31,6 @@ Panel {
   // never this panel's to stop.
   property bool owesDiscoveryStop: false
   readonly property var devices: Bluetooth.devices ? Bluetooth.devices.values : []
-  readonly property var pipewireNodes: Pipewire.nodes ? Pipewire.nodes.values : []
   property var pendingAudioOutputDevice: null
   property int pendingAudioOutputAttempts: 0
 
@@ -41,6 +40,7 @@ Panel {
   property string renamingAddress: ""
   property var extras: ({})
   property bool detailsDirty: false
+  property bool detailsRefreshQueued: false
   property string extrasText: ""
   readonly property string detailsHelper: String(Qt.resolvedUrl("bt-details")).replace(/^file:\/\//, "")
 
@@ -72,15 +72,25 @@ Panel {
     return Model.hasHumanName(device)
   }
 
-  readonly property var deviceGroups: Model.deviceLists(devices)
+  // While the panel is closed and no action is in flight, avoid sorting and
+  // projecting the full BlueZ device list on every monitor; the bar button
+  // only needs to know whether any human-named device is connected.
+  readonly property bool hasPendingActions: Model.hasEntries(pendingActions)
+  readonly property var emptyDeviceGroups: ({ connected: [], known: [], discovered: [] })
+  readonly property var deviceGroups: opened || hasPendingActions
+    ? Model.deviceLists(devices)
+    : emptyDeviceGroups
   readonly property var connectedDevices: deviceGroups.connected || []
   readonly property var knownDevices: deviceGroups.known || []
   readonly property var discoveredDevices: deviceGroups.discovered || []
+  readonly property bool anyConnected: opened || hasPendingActions
+    ? connectedDevices.length > 0
+    : Model.hasConnectedDevice(devices)
 
   readonly property string icon: {
     if (!adapter) return ""
     if (!adapter.enabled) return "󰂲"
-    if (connectedDevices.length > 0) return "󰂱"
+    if (anyConnected) return "󰂱"
     return "󰂯"
   }
 
@@ -154,27 +164,67 @@ Panel {
     return Model.sectionDevices(deviceGroups, section)
   }
 
-  // The scrollable half of the panel — remembered devices, then whatever the
-  // scan turned up — flattened into one model so a ListView can own the
-  // viewport. Each entry carries the section it came from, which is what lets
-  // the delegate and the cursor keep working in section-relative terms.
-  readonly property var scrollRows: {
-    var rows = []
-    for (var k = 0; k < knownDevices.length; k++)
-      rows.push({ dev: Model.deviceRow(knownDevices[k]), section: "known", indexInSection: k })
-    if (sectionVisible("discovered"))
-      for (var d = 0; d < discoveredDevices.length; d++)
-        rows.push({ dev: Model.deviceRow(discoveredDevices[d]), section: "discovered", indexInSection: d })
-    return rows
+  // In-place ListModels so discovery updates add, move, or remove only the
+  // rows that changed instead of resetting the Repeater and ListView (which
+  // previously rebuilt every delegate and wiped an active rename mid-typing).
+  // Models stay frozen on close so the fade-out animation doesn't flash empty.
+  ListModel { id: connectedModel }
+  ListModel { id: scrollModel }
+
+  function updateRowInPlace(listModel, index, next) {
+    var cur = listModel.get(index)
+    var keys = Model.rowKeys
+    for (var k = 0; k < keys.length; k++) {
+      var field = keys[k]
+      if (cur[field] !== next[field]) listModel.setProperty(index, field, next[field])
+    }
   }
 
-  // Connected devices render above the scroll area; same primitives-only
-  // projection so those delegates never hold Device QObject wrappers either.
-  readonly property var connectedRows: {
-    var rows = []
+  function syncRowModel(listModel, rows) {
+    var keep = Object.create(null)
+    for (var n = 0; n < rows.length; n++) keep[rows[n].key] = true
+
+    for (var r = listModel.count - 1; r >= 0; r--) {
+      if (!keep[listModel.get(r).key]) listModel.remove(r, 1)
+    }
+
+    for (var i = 0; i < rows.length; i++) {
+      var next = rows[i]
+      if (i < listModel.count && listModel.get(i).key === next.key) {
+        updateRowInPlace(listModel, i, next)
+        continue
+      }
+      var found = -1
+      for (var j = i + 1; j < listModel.count; j++) {
+        if (listModel.get(j).key === next.key) { found = j; break }
+      }
+      if (found >= 0) {
+        listModel.move(found, i, 1)
+        updateRowInPlace(listModel, i, next)
+      } else {
+        listModel.insert(i, next)
+      }
+    }
+  }
+
+  function syncDeviceModels() {
+    if (!opened) return
+
+    var connectedRows = []
     for (var i = 0; i < connectedDevices.length; i++)
-      rows.push(Model.deviceRow(connectedDevices[i]))
-    return rows
+      connectedRows.push(Model.deviceRow(connectedDevices[i], "connected", i, "", false))
+    syncRowModel(connectedModel, connectedRows)
+
+    var scrollRows = []
+    for (var k = 0; k < knownDevices.length; k++)
+      scrollRows.push(Model.deviceRow(knownDevices[k], "known", k, k === 0 ? "PAIRED" : "", false))
+    if (sectionVisible("discovered")) {
+      for (var d = 0; d < discoveredDevices.length; d++) {
+        var title = d === 0 ? "AVAILABLE" : ""
+        scrollRows.push(Model.deviceRow(discoveredDevices[d], "discovered", d, title, scrollRows.length > 0 && title !== ""))
+      }
+    }
+    syncRowModel(scrollModel, scrollRows)
   }
 
   // Live BlueZ device behind a row. Rows carry primitives only, so actions
@@ -188,24 +238,19 @@ Panel {
   // Flat position of the keyboard cursor, or -1 while it sits on the hero or
   // in the connected list (both of which live outside the scroll area).
   readonly property int scrollRowIndex: {
-    if (focusSection !== "known" && focusSection !== "discovered") return -1
-    for (var i = 0; i < scrollRows.length; i++)
-      if (scrollRows[i].section === focusSection && scrollRows[i].indexInSection === selectedIndex) return i
+    if (selectedIndex < 0) return -1
+    if (focusSection === "known")
+      return selectedIndex < knownDevices.length ? selectedIndex : -1
+    if (focusSection === "discovered" && sectionVisible("discovered"))
+      return selectedIndex < discoveredDevices.length ? knownDevices.length + selectedIndex : -1
     return -1
   }
 
-  // A row opens a section when it is the first of its kind in the flat list.
-  function scrollSectionTitle(index) {
-    var rows = scrollRows
-    if (index < 0 || index >= rows.length) return ""
-    if (index > 0 && rows[index - 1].section === rows[index].section) return ""
-    return rows[index].section === "known" ? "PAIRED" : "AVAILABLE"
-  }
-
   function audioSinks() {
+    var nodes = Pipewire.nodes ? Pipewire.nodes.values : []
     var sinks = []
-    for (var i = 0; i < pipewireNodes.length; i++) {
-      var node = pipewireNodes[i]
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i]
       if (node && node.isSink && !node.isStream) sinks.push(node)
     }
     return sinks
@@ -338,9 +383,7 @@ Panel {
   function requestForget(device) {
     if (!device || !device.address) return
     if (renamingAddress !== "") cancelRename()
-    forgetConfirm.selectedIndex = 1
     forgetTarget = { address: device.address, label: deviceLabel(device) || "this device" }
-    Qt.callLater(function() { if (root.forgetTarget) forgetKeys.forceActiveFocus() })
   }
 
   function confirmForget() {
@@ -409,8 +452,16 @@ Panel {
     if (dev) dev[key] = on
   }
 
-  // Connected devices (for battery) plus whichever card is open.
+  // Connected devices (for battery) plus whichever card is open. Coalesced per
+  // event-loop turn so simultaneous open + connectedKey signals run once.
   function refreshDetails() {
+    if (!opened || detailsRefreshQueued) return
+    detailsRefreshQueued = true
+    Qt.callLater(runRefreshDetails)
+  }
+
+  function runRefreshDetails() {
+    detailsRefreshQueued = false
     if (!opened) return
     if (detailsProc.running) { detailsDirty = true; return }
     var addrs = []
@@ -425,10 +476,11 @@ Panel {
   // Hand keys back to the panel cursor once the rename field closes.
   onRenamingAddressChanged: {
     if (renamingAddress === "" && opened)
-      Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+      Qt.callLater(function() { if (panel.loadedContent) panel.loadedContent.forceActiveFocus() })
   }
 
   function syncPendingActions() {
+    if (!hasPendingActions) return
     var next = cloneMap(pendingActions)
     var changed = false
 
@@ -542,20 +594,34 @@ Panel {
     requestForget(dev)
   }
 
+  property bool pendingOpenFocus: false
+
+  function pickInitialSection() {
+    if (connectedDevices.length > 0) { focusSection = "connected"; selectedIndex = 0 }
+    else if (knownDevices.length > 0) { focusSection = "known"; selectedIndex = 0 }
+    else if (sectionVisible("discovered")) { focusSection = "discovered"; selectedIndex = 0 }
+    else { focusSection = "header"; selectedIndex = 0 }
+  }
+
   onOpenedChanged: {
     if (opened) {
       // Adopt a discovery session that is already running — a popout handoff
       // from another monitor, or one leaked by an instance that could not
       // finish its own stop — so this close settles it either way.
       if (adapter !== null && adapter.discovering) owesDiscoveryStop = true
-      if (connectedDevices.length > 0) { focusSection = "connected"; selectedIndex = 0 }
-      else if (knownDevices.length > 0) { focusSection = "known"; selectedIndex = 0 }
-      else if (discoveredDevices.length > 0) { focusSection = "discovered"; selectedIndex = 0 }
-      else { focusSection = "header" }
       actionFocused = false
       cursorActive = false
+      focusedDeviceAddress = ""
+      if (deviceGroups !== emptyDeviceGroups) {
+        pendingOpenFocus = false
+        pickInitialSection()
+        syncDeviceModels()
+      } else {
+        pendingOpenFocus = true
+      }
       refreshDetails()
     } else {
+      pendingOpenFocus = false
       renamingAddress = ""
       expandedAddress = ""
       forgetTarget = null
@@ -565,7 +631,7 @@ Panel {
   // Hand keys back to the panel cursor once the forget dialog closes.
   onForgetTargetChanged: {
     if (forgetTarget === null && opened)
-      Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+      Qt.callLater(function() { if (panel.loadedContent) panel.loadedContent.forceActiveFocus() })
   }
 
   // Another per-monitor instance of this widget whose panel is open, if any.
@@ -612,14 +678,24 @@ Panel {
 
   onSelectedIndexChanged: updateFocusedAddress()
   onFocusSectionChanged: updateFocusedAddress()
-  onConnectedDevicesChanged: { reselectFocusedDevice(); syncPendingActions() }
+  onDeviceGroupsChanged: {
+    if (hasPendingActions) syncPendingActions()
+    if (!opened) return
+    if (pendingOpenFocus) {
+      pendingOpenFocus = false
+      pickInitialSection()
+    } else {
+      reselectFocusedDevice()
+    }
+    syncDeviceModels()
+  }
   // connectedDevices is rebuilt on every list change during a scan; the
   // string only changes when the set of connected devices does.
-  readonly property string connectedKey: connectedDevices.map(function(d) { return d.address }).join(",")
-  onConnectedKeyChanged: refreshDetails()
-  onKnownDevicesChanged: { reselectFocusedDevice(); syncPendingActions() }
-  onDiscoveredDevicesChanged: { reselectFocusedDevice(); syncPendingActions() }
-  onVisibleSectionsChanged: clampCursor()
+  readonly property string connectedKey: opened
+    ? connectedDevices.map(function(d) { return d.address }).join(",")
+    : ""
+  onConnectedKeyChanged: if (opened) refreshDetails()
+  onVisibleSectionsChanged: if (opened) clampCursor()
 
   function clampCursor() {
     var sections = visibleSections
@@ -713,6 +789,7 @@ Panel {
     target: root.adapter
     function onDiscoveringChanged() {
       if (!root.adapter.discovering) root.owesDiscoveryStop = false
+      if (root.opened) root.syncDeviceModels()
     }
   }
 
@@ -820,14 +897,14 @@ Panel {
   SequentialAnimation {
     id: phraseSwap
     PropertyAnimation {
-      target: heroStatus; property: "opacity"
+      target: panel.loadedContent ? panel.loadedContent.heroStatus : null; property: "opacity"
       to: 0.0; duration: 180; easing.type: Easing.OutQuad
     }
     ScriptAction {
       script: root.phraseIndex = (root.phraseIndex + 1) % root.activePhrases.length
     }
     PropertyAnimation {
-      target: heroStatus; property: "opacity"
+      target: panel.loadedContent ? panel.loadedContent.heroStatus : null; property: "opacity"
       to: 1.0; duration: 260; easing.type: Easing.InQuad
     }
   }
@@ -837,7 +914,7 @@ Panel {
     function onRotatingPhrasesChanged() {
       if (!root.rotatingPhrases) {
         phraseSwap.stop()
-        heroStatus.opacity = 1.0
+        if (panel.loadedContent) panel.loadedContent.heroStatus.opacity = 1.0
       }
     }
   }
@@ -855,7 +932,7 @@ Panel {
     Quickshell.execDetached(["omarchy-bluetooth-power", adapter.enabled ? "off" : "on"])
   }
 
-  IpcHandler {
+  ShellIpc {
     target: "omarchy.bluetooth"
 
     function open() { root.open() }
@@ -884,15 +961,17 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: keyCatcher
+    focusTarget: panel.loadedContent
     contentWidth: panel.fittedContentWidth(Style.space(380))
     // Room for the forget dialog even when the device list is short.
     contentHeight: panel.fittedContentHeight(root.forgetTarget !== null
-      ? Math.max(column.implicitHeight, Style.space(170))
-      : column.implicitHeight)
+      ? Math.max(panel.loadedContentHeight, Style.space(170))
+      : panel.loadedContentHeight)
 
-    PanelKeyCatcher {
+    content: PanelKeyCatcher {
       id: keyCatcher
+      property alias heroStatus: heroStatus
+      implicitHeight: column.implicitHeight
       anchors.fill: parent
       // The rename field and the forget dialog own input while open.
       blocked: root.renamingAddress !== "" || root.forgetTarget !== null
@@ -967,6 +1046,7 @@ Panel {
 
             Text {
               text: "Bluetooth"
+              textFormat: Text.PlainText
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.title
@@ -998,7 +1078,7 @@ Panel {
 
         Column {
           id: connectedList
-          visible: root.connectedDevices.length > 0
+          visible: connectedModel.count > 0
           width: parent.width
           spacing: Style.space(10)
 
@@ -1009,13 +1089,12 @@ Panel {
           }
 
           Repeater {
-            model: root.connectedRows
+            model: connectedModel
             DeviceEntry {
-              required property var modelData
-              required property int index
+              required property var model
               width: connectedList.width
-              dev: modelData
-              rowIndex: index
+              dev: model
+              rowIndex: model.indexInSection
               sectionName: "connected"
               isDiscovered: false
             }
@@ -1023,7 +1102,7 @@ Panel {
         }
 
         PanelSeparator {
-          visible: root.connectedDevices.length > 0 && root.scrollRows.length > 0
+          visible: connectedModel.count > 0 && scrollModel.count > 0
           foreground: root.bar.foreground
         }
 
@@ -1042,22 +1121,15 @@ Panel {
 
           ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-          model: root.scrollRows
+          model: scrollModel
           currentIndex: root.scrollRowIndex
-          // Deferred by a turn. Called straight out of the signal the position
-          // does not take — verified with the cursor six rows down and
-          // contentY still 0 — because scrollRows is rebuilt every time
-          // discovery reports, and swapping the model resets the view out from
-          // under the call. Network's list is stable enough not to need this.
           onCurrentIndexChanged: if (currentIndex >= 0) Qt.callLater(keepCurrentVisible)
           function keepCurrentVisible() {
             if (currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Contain)
           }
 
           delegate: Item {
-            required property var modelData
-            required property int index
-            readonly property string sectionTitle: root.scrollSectionTitle(index)
+            required property var model
 
             width: ListView.view.width
             height: delegateColumn.implicitHeight
@@ -1068,25 +1140,25 @@ Panel {
               spacing: Style.space(10)
 
               PanelSeparator {
-                visible: index > 0 && sectionTitle !== ""
+                visible: model.showSeparator
                 height: visible ? implicitHeight : 0
                 foreground: root.bar.foreground
               }
 
               PanelSectionHeader {
-                visible: sectionTitle !== ""
+                visible: model.sectionTitle !== ""
                 height: visible ? implicitHeight : 0
-                text: sectionTitle
+                text: model.sectionTitle
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
               }
 
               DeviceEntry {
                 width: parent.width
-                dev: modelData.dev
-                rowIndex: modelData.indexInSection
-                sectionName: modelData.section
-                isDiscovered: modelData.section === "discovered"
+                dev: model
+                rowIndex: model.indexInSection
+                sectionName: model.section
+                isDiscovered: model.section === "discovered"
               }
             }
           }
@@ -1094,7 +1166,7 @@ Panel {
 
         Text {
           textFormat: Text.PlainText
-          visible: root.connectedDevices.length === 0 && root.scrollRows.length === 0
+          visible: connectedModel.count === 0 && scrollModel.count === 0
           text: !root.adapter ? "No Bluetooth adapter"
               : !root.adapter.enabled ? "Turn Bluetooth on to scan"
               : "Scanning for devices…"
@@ -1106,40 +1178,47 @@ Panel {
         }
       }
 
-      // Forget confirmation, over the whole panel.
-      Item {
+      // Forget confirmation, built only while a confirmation is active.
+      Loader {
         anchors.fill: parent
         z: 10
-        visible: root.forgetTarget !== null
+        active: root.forgetTarget !== null
+        visible: active
 
-        // Stops rows underneath reacting to hover while the dialog is up.
-        MouseArea {
-          anchors.fill: parent
-          hoverEnabled: true
-          acceptedButtons: Qt.NoButton
-        }
+        sourceComponent: Item {
+          // Stops rows underneath reacting to hover while the dialog is up.
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.NoButton
+          }
 
-        ConfirmDialog {
-          id: forgetConfirm
-          anchors.fill: parent
-          opened: root.forgetTarget !== null
-          message: root.forgetTarget
-            ? "Forget " + root.forgetTarget.label + "? You'll need to pair it again to use it."
-            : ""
-          confirmText: "Forget"
-          foreground: root.bar.foreground
-          fontFamily: root.bar.fontFamily
-          onCanceled: root.cancelForget()
-          onConfirmed: root.confirmForget()
-        }
+          ConfirmDialog {
+            id: forgetConfirm
+            anchors.fill: parent
+            opened: root.forgetTarget !== null
+            selectedIndex: 1
+            message: root.forgetTarget
+              ? "Forget " + root.forgetTarget.label + "? You'll need to pair it again to use it."
+              : ""
+            confirmText: "Forget"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            onCanceled: root.cancelForget()
+            onConfirmed: root.confirmForget()
+          }
 
-        // Takes focus while the dialog is open. Every key stops here, so
-        // nothing reaches the device list behind it.
-        Item {
-          id: forgetKeys
-          Keys.onPressed: function(event) {
-            forgetConfirm.handleKey(event)
-            event.accepted = true
+          // Takes focus while the dialog is open. Every key stops here, so
+          // nothing reaches the device list behind it.
+          Item {
+            id: forgetKeys
+            Keys.onPressed: function(event) {
+              forgetConfirm.handleKey(event)
+              event.accepted = true
+            }
+            Component.onCompleted: Qt.callLater(function() {
+              if (root.forgetTarget) forgetKeys.forceActiveFocus()
+            })
           }
         }
       }

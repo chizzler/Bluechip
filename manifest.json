@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.chizzler.bluechip",
   "name": "Bluechip",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Chizzler",
   "description": "Bluetooth devices with a details card, rename, trust/block switches, device icons, and a battery gauge that includes controller batteries",
   "kinds": [

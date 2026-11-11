@@ -42,6 +42,15 @@ function hasHumanName(device) {
   return label !== "" && !isUuidLike(label) && !isAddressLike(label)
 }
 
+function hasConnectedDevice(devices) {
+  var values = toArray(devices)
+  for (var i = 0; i < values.length; i++) {
+    var d = values[i]
+    if (d && d.connected && hasHumanName(d)) return true
+  }
+  return false
+}
+
 function nodeProps(node) {
   return node && node.ready && node.properties ? node.properties : {}
 }
@@ -89,22 +98,54 @@ function sortedByLabel(devices) {
 // var property, and BlueZ churn (discovery timeouts, unpair) can destroy the
 // object while a delegate is still incubating, which segfaults quickshell.
 // Actions resolve the backend object via Panel.deviceFor().
-function deviceRow(d) {
+//
+// Every row carries the same primitive fields so a QML ListModel fixes a
+// complete role schema from the first entry and can update rows in place
+// without tearing down delegates during scans.
+var rowKeys = [
+  "key",
+  "address",
+  "name",
+  "deviceName",
+  "connected",
+  "state",
+  "batteryAvailable",
+  "battery",
+  "pairing",
+  "paired",
+  "bonded",
+  "trusted",
+  "blocked",
+  "icon",
+  "section",
+  "indexInSection",
+  "sectionTitle",
+  "showSeparator"
+]
+
+function deviceRow(d, section, indexInSection, sectionTitle, showSeparator) {
   if (!d) return null
+  var address = String(d.address || "")
+  var sec = String(section || "")
   return {
-    address: d.address || "",
-    name: d.name || "",
-    deviceName: d.deviceName || "",
+    key: sec !== "" ? sec + ":" + address : address,
+    address: address,
+    name: String(d.name || ""),
+    deviceName: String(d.deviceName || ""),
     connected: !!d.connected,
-    state: d.state !== undefined ? d.state : -1,
+    state: d.state !== undefined ? Number(d.state) : -1,
     batteryAvailable: !!d.batteryAvailable,
-    battery: d.battery !== undefined ? d.battery : 0,
+    battery: d.battery !== undefined ? Number(d.battery) : 0,
     pairing: !!d.pairing,
     paired: !!d.paired,
     bonded: !!d.bonded,
     trusted: !!d.trusted,
     blocked: !!d.blocked,
-    icon: d.icon || ""
+    icon: String(d.icon || ""),
+    section: sec,
+    indexInSection: Number(indexInSection || 0),
+    sectionTitle: String(sectionTitle || ""),
+    showSeparator: !!showSeparator
   }
 }
 
@@ -225,6 +266,11 @@ function cloneMap(map) {
   return next
 }
 
+function hasEntries(map) {
+  for (var key in map || {}) return true
+  return false
+}
+
 function pendingAction(actions, address) {
   return address && actions && actions[address] ? actions[address] : ""
 }
@@ -267,10 +313,12 @@ if (typeof module !== "undefined") {
     isAddressLike: isAddressLike,
     normalizedAddress: normalizedAddress,
     hasHumanName: hasHumanName,
+    hasConnectedDevice: hasConnectedDevice,
     nodeProps: nodeProps,
     nodeText: nodeText,
     bluetoothSinkMatchesDevice: bluetoothSinkMatchesDevice,
     sortedByLabel: sortedByLabel,
+    rowKeys: rowKeys,
     deviceRow: deviceRow,
     extraFor: extraFor,
     batteryLevel: batteryLevel,
@@ -279,6 +327,7 @@ if (typeof module !== "undefined") {
     deviceGlyph: deviceGlyph,
     deviceLists: deviceLists,
     cloneMap: cloneMap,
+    hasEntries: hasEntries,
     pendingAction: pendingAction,
     withPendingAction: withPendingAction,
     visibleSections: visibleSections,

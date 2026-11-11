@@ -1,142 +1,106 @@
 # Developing Bluechip
 
-Notes for working on Bluechip itself. For installing and using it, see
-[README.md](README.md).
+Technical notes for working on Bluechip. For installing and using it, see
+[README.md](README.md). For philosophy, performance findings and future ideas,
+see [PROJECT.md](PROJECT.md).
 
-## Background
+## Slot replacement
 
-Bluechip started as a clone of Omarchy's built-in Bluetooth widget
-(`omarchy plugin clone omarchy.bluetooth`). The goal was a Bluetooth panel that
-stays native to the Omarchy shell (same components, same theme, same place in
-the bar) and adds what the stock widget lacks:
-
-- **Battery for devices whose driver reports it outside Bluetooth.** For
-  example, an 8BitDo Pro 2 on the xpadneo driver publishes only a coarse level
-  such as "Full" under `/sys/class/power_supply`.
-- **Device details:** type, advertised name, address, status, profiles and
-  hardware ID.
-- **Rename** (BlueZ alias), plus **Trusted** and **Blocked** switches.
-- **Device-type icons.**
-
-The manifest keeps `"omarchy": { "clonedFrom": "omarchy.bluetooth" }`. With
-that in place:
+Bluechip started from `omarchy plugin clone omarchy.bluetooth` and keeps
+`"omarchy": { "clonedFrom": "omarchy.bluetooth" }` in `manifest.json` alongside
+the stock `moduleName` / `ipcTarget` (`omarchy.bluetooth`) in `Panel.qml`. With
+both in place:
 
 - `omarchy plugin add … --enable` puts Bluechip in the stock widget's spot in
-  the bar.
-- The shell routes calls for `omarchy.bluetooth`, such as the default
-  `Super+Ctrl+B` (`omarchy-shell shell toggle omarchy.bluetooth`), to Bluechip
-  through `PluginRegistry.resolveEnabledId`.
+  the bar without disturbing the rest of the bar layout.
+- Shell calls targeting `omarchy.bluetooth`—including the default
+  `Super+Ctrl+B` (`omarchy-shell shell toggle omarchy.bluetooth`)—route to
+  Bluechip through `PluginRegistry.resolveEnabledId`, and direct IPC calls hit
+  its `ShellIpc` handler over Omarchy's in-process socket.
 
-`Panel.qml` keeps the stock `moduleName` / `ipcTarget` (`omarchy.bluetooth`)
-for the same reason.
+Upstream original, for comparison:
+`/usr/share/omarchy/shell/plugins/panels/bluetooth/`.
 
 ## Files
 
 | File | Role |
 |------|------|
 | `manifest.json` | Plugin manifest (ID `io.github.chizzler.bluechip`) |
-| `Panel.qml` | Bar button and panel. The stock widget plus the details card, rename field, switches, gauge and icons |
-| `Model.js` | Pure helpers: labels, device rows, battery gauge model, device type names and glyphs |
+| `Panel.qml` | Bar button, lazy popup, in-place list models, details card, rename, switches and gauge |
+| `Model.js` | Pure helpers: labels, uniform row schema, battery gauge model, device type names and glyphs |
 | `bt-details` | Bash + jq helper. Prints extra per-device details as JSON |
 
-Upstream original, for comparison:
-`/usr/share/omarchy/shell/plugins/panels/bluetooth/`.
+## Architecture
 
-## How it works
-
-- **`bt-details <mac>…`** prints JSON keyed by lowercase MAC. It runs three
-  processes in total (bash, one `busctl`, one `jq`), however many devices
-  there are.
-  - `profiles` and `hardwareId`: read from BlueZ's `Device1` properties
-    (`UUIDs`, `Modalias`) with a single `ObjectManager.GetManagedObjects`
-    call. Common SIG UUIDs map to names; others show as `0x….`
+- **`bt-details <mac>…`** prints JSON keyed by lowercase MAC in three processes
+  total (`bash`, one `busctl`, one `jq`), regardless of device count.
+  - `profiles` and `hardwareId`: read from BlueZ `Device1` (`UUIDs`,
+    `Modalias`) via a single `ObjectManager.GetManagedObjects` call. Common SIG
+    UUIDs map to names; others show as `0x…`.
   - `battery`: `{source, percent, level, status}` from the
     `/sys/class/power_supply` entry whose HID parent's `uevent` has
-    `HID_UNIQ=<mac>`. That works whatever the driver names the supply. If
-    `HID_UNIQ` is missing or isn't a MAC (wired controllers can carry a USB
-    serial there), it falls back to a MAC in the supply's name, as with
-    hid-sony, hid-playstation and hid-nintendo (`ps-controller-battery-<mac>`
-    and similar). `-`/`_` separators are normalised to `:`.
-    Batteries BlueZ itself reports come through Quickshell's
-    `device.battery`, so the helper doesn't repeat them.
-- **`Panel.qml`** runs the helper through a Quickshell `Process`:
-  - when the panel opens
-  - every 10 s while it's open
-  - when the set of connected devices changes (`connectedKey`), not on every
-    list update during a scan
-
-  It covers connected devices plus the one whose card is open. An identical
-  result is ignored, so bindings don't re-run for nothing.
-- **Details cards** are built by a `Loader` only while open, so at most one
-  exists.
-- **Rename / Trusted / Blocked** write `name`, `trusted` and `blocked` on
-  Quickshell's `BluetoothDevice`. These map directly onto BlueZ `Device1`
-  properties. An empty name clears the alias.
-- **Labels** prefer the alias (`device.name`), so renames show. Address-like
-  aliases fall back to `deviceName`.
-- **Battery gauge:** five segments, one per kernel `capacity_level` (Critical,
-  Low, Normal, High, Full), or one per 20% when a percentage is available.
-  - Colours are the theme's `Color.accent`, switching to `Color.urgent` at
-    Low/Critical (20% or below).
-  - The charge state comes from the supply's `status`: Charging, Full
-    (shown as "Charged") or Not charging. Discharging/Unknown are omitted. It
-    applies even when BlueZ supplies the percentage.
-  - Empty segments are the bar foreground at 18% opacity.
+    `HID_UNIQ=<mac>`, falling back to a MAC in the supply's directory name
+    (hid-sony, hid-playstation, hid-nintendo) when `HID_UNIQ` is missing or a
+    USB serial. `-`/`_` separators normalise to `:`. Batteries reported by
+    BlueZ itself already arrive via Quickshell's `device.battery`, so the
+    helper doesn't duplicate them.
+- **Detail refreshes (`Panel.qml`):** runs `bt-details` on open, every 10 s
+  while open, and when `connectedKey` changes—covering connected devices plus
+  `expandedAddress`. Same-turn requests coalesce via `Qt.callLater`, overlapping
+  runs queue one follow-up via `detailsDirty`, and identical JSON (`extrasText`)
+  is ignored so bindings don't re-evaluate unnecessarily.
+- **Lazy popup & idle state:** `KeyboardPanel` builds its `content` component
+  on first open rather than on every monitor at startup. `DeviceDetails` and
+  `ConfirmDialog` each sit behind a `Loader` so neither exists while closed.
+  While closed with no action in flight (`!opened && !hasPendingActions`),
+  `deviceGroups` sleeps and `icon` uses `Model.hasConnectedDevice`.
+- **In-place list models:** `connectedModel` (`Repeater`) and `scrollModel`
+  (`ListView`) are `ListModel`s synced in place (`syncRowModel`) over a fixed
+  primitive schema (`Model.rowKeys`). Scan updates only insert, move, remove or
+  update changed rows, preserving open cards and active edits in `renameField`.
+  Models stay frozen on close so the fade-out doesn't flash empty.
+- **Device properties & labels:** rename, Trusted and Blocked write `name`,
+  `trusted` and `blocked` directly on Quickshell's `BluetoothDevice` (BlueZ
+  `Device1`). An empty name clears the alias. `Model.deviceLabel` prefers the
+  alias unless it looks like a MAC or UUID, falling back to `deviceName`.
+- **Battery gauge:** `Model.batteryLevel` resolves BlueZ percentage or driver
+  percentage/coarse `capacity_level` into 0–5 segments (`Commons.Color.accent`,
+  or `Commons.Color.urgent` at ≤20% / Low / Critical) and pairs it with the
+  driver's `status` (`Charging`, `Full` → `Charged`, `Not charging`).
 - **Connect feedback:** `omarchy-bluetooth-device` ends every `bluetoothctl`
-  call with `|| true`, so its exit code says nothing. Connect and pair run it
-  through a Quickshell `Process` (one per attempt, made from the
-  `connectProcess` component) only to learn when it has finished.
-  - The command is `sh -c 'setsid "$@" & wait $!'`. A destroyed `Process`
-    kills its child, and a shell restart destroys it. `setsid` gives the
-    helper its own session so it survives, and `wait` keeps the `Process`
-    running until the helper exits.
-  - When it exits and the device is still marked "connecting", the panel
-    waits 1.5 s for BlueZ to report Connected. If it doesn't, the row shows
-    "Couldn't pair" (a pair that left the device unpaired) or "Couldn't
-    connect" for 6 s. One `settle` timer on the attempt's `Process` handles
-    both waits, then the `Process` destroys itself.
-  - Known gap: a device that connects and drops again within the 1.5 s
-    shows "Couldn't connect". Exact results would need a Bluechip-owned
-    helper that reports `bluetoothctl`'s real outcome, which would duplicate
-    Omarchy's helper.
-  - A second connect on the same device while a helper runs is ignored.
-  - `pendingTimeout` (20 s) keeps entries whose helper is still running,
-    because a pair can take over 40 s.
-- **Forget confirmation:** the forget button, `x` and right-click all call
-  `requestForget`, which opens the shell's `ConfirmDialog` over the panel.
-  While it's open, `forgetKeys` holds focus and swallows every key, and
-  `PanelKeyCatcher` is blocked. The panel grows to at least
-  `Style.space(170)` so the dialog isn't clipped.
-- **Icons:** BlueZ icon names (`input-gaming`, `audio-headset`, …) map to
-  Nerd Font Material glyphs. Unknown types keep the Bluetooth glyph.
+  call with `|| true`, so its exit code carries no status. Connect and pair run
+  it via a per-attempt `Process` (`sh -c 'setsid "$@" & wait $!'`) so `setsid`
+  protects in-flight pairings across shell restarts while `wait` reports exit.
+  - If the row is still `"connecting"` on exit, a `settle` timer waits 1.5 s
+    for BlueZ to report `Connected`; otherwise it records `"Couldn't pair"` or
+    `"Couldn't connect"` for 6 s and destroys the `Process`.
+  - Known gap: a device that connects and drops again inside that 1.5 s window
+    shows `"Couldn't connect"`.
+  - Duplicate clicks while an attempt is running are ignored, and
+    `pendingTimeout` (20 s) spares entries whose helper is still running (since
+    pairing can take over 40 s).
+- **Forget confirmation:** `requestForget` sets `forgetTarget`, activating the
+  `ConfirmDialog` loader, growing the panel to at least `Style.space(170)`,
+  blocking `PanelKeyCatcher`, and handing focus to `forgetKeys`.
 
 ## Workflow and gotchas
 
 - **Restart after edits.** Hot reload logs "Local plugin changed" but keeps
-  serving the cached component, so run `omarchy restart shell`.
-- **A symlinked checkout works.** The scanner globs `"$dir"/*/`, so
-  `~/.config/omarchy/plugins/io.github.chizzler.bluechip` can be a symlink to
-  a working copy.
-- **`console.log` output from the plugin doesn't reach `quickshell log`.** To
-  inspect state, add a temporary `IpcHandler` with a function that returns a
-  string, and call it with `omarchy-shell <target> <function>`.
-- **The panel grabs the keyboard while it's open, and `x` then `Enter`
-  forgets the selected device.** When testing with `wtype`, close the panel in
-  the same command.
-- **The panel opens on the focused monitor.** Screenshot that one.
-- **QML `visible` trap:** a child reads as hidden while its parent is hidden.
-  Never bind a container's `visible` to its children's `visible`.
-
-## Ideas
-
-- Battery on the bar icon, or a tooltip
-- Low-battery notification
-- Wake-allowed switch
-- Headphone profile switch (A2DP / HFP)
-- Background reconnect for devices that don't reconnect themselves
+  serving the cached component; run `omarchy restart shell`.
+- **Symlinked checkouts work.** The plugin scanner globs `"$dir"/*/`, so
+  `~/.config/omarchy/plugins/io.github.chizzler.bluechip` can symlink here.
+- **`console.log` doesn't reach `quickshell log`.** To inspect live state, add
+  a temporary function on `ShellIpc` returning a string and call
+  `omarchy-shell omarchy.bluetooth <function>`.
+- **Keyboard grab during `wtype` tests.** `x` then `Enter` forgets the selected
+  device; always close the panel in the same `wtype` command.
+- **Screenshots:** the panel opens on the focused monitor—capture that output.
+- **QML `visible` trap:** a child's `visible` reads `false` while its parent is
+  hidden. Never bind a container's `visible` to its children's `visible`.
 
 ## Keeping up with upstream
 
-After Omarchy updates, compare `Panel.qml` and `Model.js` with the upstream
-copies and bring over relevant fixes. Last synced with Omarchy 4.0.6
-(`Color` is now qualified as `Commons.Color`, as upstream does).
+After Omarchy updates, diff `/usr/share/omarchy/shell/plugins/panels/bluetooth/`
+(`Panel.qml` and `Model.js`) against Bluechip and port relevant changes. Synced
+with Omarchy 4.0.6 (`Commons.Color`, `ShellIpc`, and lazy `KeyboardPanel`
+content).
