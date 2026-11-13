@@ -54,6 +54,13 @@ Upstream original, for comparison:
   `ConfirmDialog` each sit behind a `Loader` so neither exists while closed.
   While closed with no action in flight (`!opened && !hasPendingActions`),
   `deviceGroups` sleeps and `icon` uses `Model.hasConnectedDevice`.
+- **Rename editor lifetime:** its own `Loader` creates the editable field only
+  while the panel is open and that device is being renamed. Opening Details
+  creates no text input; save, cancel, or close destroys it. Visibility alone
+  is insufficient: on affected Qt builds, even a hidden editable TextField
+  reads clipboard text on clipboard changes to update `canPaste`. This avoids
+  that automatic transfer outside an explicit rename; it does not repair Qt's
+  clipboard reader while the editor is open.
 - **In-place list models:** `connectedModel` (`Repeater`) and `scrollModel`
   (`ListView`) are `ListModel`s synced in place (`syncRowModel`) over a fixed
   primitive schema (`Model.rowKeys`). Scan updates only insert, move, remove or
@@ -97,6 +104,15 @@ Upstream original, for comparison:
 - **Screenshots:** the panel opens on the focused monitor—capture that output.
 - **QML `visible` trap:** a child's `visible` reads `false` while its parent is
   hidden. Never bind a container's `visible` to its children's `visible`.
+
+## Regression checks
+
+Run `python3 tests/rename_clipboard.py` with PySide6 installed. It runs the
+production name/rename rows offscreen with native Qt text input and isolated
+presentation stubs. A harmless counted clipboard offer checks that Details,
+save, cancel, and panel close leave no editor or clipboard-body reads. It also
+checks focus, selection, Enter, Escape, the Save button, and an empty alias.
+An optional path to an older `Panel.qml` demonstrates the original failure.
 
 ## Keeping up with upstream
 

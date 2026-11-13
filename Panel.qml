@@ -1571,46 +1571,56 @@ Panel {
         }
       }
 
-      Item {
+      // Hidden editable TextFields still react to clipboard changes in Qt.
+      // Keep the entire editor uninstantiated until Rename is requested, and
+      // destroy it on save/cancel/close instead of only hiding it.
+      Loader {
+        id: renameLoader
         width: parent.width
-        visible: card.renaming
-        implicitHeight: Math.max(renameField.implicitHeight, saveBtn.implicitHeight)
+        active: root.opened && card.renaming
+        visible: active
+        height: item ? item.implicitHeight : 0
 
-        TextField {
-          id: renameField
-          anchors.left: parent.left
-          anchors.right: saveBtn.left
-          anchors.rightMargin: Style.space(6)
-          anchors.verticalCenter: parent.verticalCenter
-          placeholderText: (card.dev && card.dev.deviceName ? card.dev.deviceName : "Name") + " (leave empty to reset)"
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-          foreground: root.bar.foreground
-          horizontalPadding: Style.spacing.controlGap
-          verticalPadding: Style.spacing.controlPaddingY
-          // Seed with the current name each time the field opens. The card can
-          // be created already renaming (r on a collapsed row), so also on load.
-          function begin() {
-            text = root.deviceLabel(card.dev)
-            Qt.callLater(function() { renameField.forceActiveFocus(); renameField.selectAll() })
+        sourceComponent: Item {
+          implicitHeight: Math.max(renameField.implicitHeight, saveBtn.implicitHeight)
+
+          TextField {
+            id: renameField
+            anchors.left: parent.left
+            anchors.right: saveBtn.left
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            placeholderText: (card.dev && card.dev.deviceName ? card.dev.deviceName : "Name") + " (leave empty to reset)"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.body
+            foreground: root.bar.foreground
+            horizontalPadding: Style.spacing.controlGap
+            verticalPadding: Style.spacing.controlPaddingY
+            function focusForRename() {
+              if (!root.opened || !card.renaming) return
+              forceActiveFocus()
+              selectAll()
+            }
+
+            onAccepted: root.commitRename(text)
+            Keys.onEscapePressed: root.cancelRename()
+            Component.onCompleted: {
+              text = root.deviceLabel(card.dev)
+              Qt.callLater(focusForRename)
+            }
           }
 
-          onAccepted: root.commitRename(text)
-          Keys.onEscapePressed: root.cancelRename()
-          onVisibleChanged: if (visible) begin()
-          Component.onCompleted: if (visible) begin()
-        }
-
-        PanelActionButton {
-          id: saveBtn
-          anchors.right: parent.right
-          anchors.verticalCenter: parent.verticalCenter
-          iconText: "󰄬"
-          tooltipText: "Save"
-          foreground: root.bar.foreground
-          hoverColor: root.bar.foreground
-          fontFamily: root.bar.fontFamily
-          onClicked: root.commitRename(renameField.text)
+          PanelActionButton {
+            id: saveBtn
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "󰄬"
+            tooltipText: "Save"
+            foreground: root.bar.foreground
+            hoverColor: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            onClicked: root.commitRename(renameField.text)
+          }
         }
       }
 
